@@ -1,2 +1,2 @@
 # energy-usage-dashboard
-Dashboard showing the energy usage dashboard across various nyit campuses
+Dashboard showing the energy usage across various nyit campuses
