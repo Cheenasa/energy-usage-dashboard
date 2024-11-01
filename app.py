@@ -15,22 +15,13 @@ st.sidebar.header("Filter Options")
 default_commodity_file = 'utility.xlsx'  # Update with your file path
 default_temperature_file = 'tempdata.xlsx'  # Update with your file path
 
-# Load the datasets
-progress_bar = st.sidebar.progress(0)
+# Load the datasets with caching
+@st.cache_data
+def load_data(file_path):
+    return pd.read_excel(file_path)
 
-try:
-    data_commodity = pd.read_excel(default_commodity_file)
-except FileNotFoundError:
-    st.error(f"Default commodity file '{default_commodity_file}' not found. Please ensure the file is available.")
-    st.stop()
-
-try:
-    data_temperature = pd.read_excel(default_temperature_file)
-except FileNotFoundError:
-    st.error(f"Default temperature file '{default_temperature_file}' not found. Please ensure the file is available.")
-    st.stop()
-
-progress_bar.progress(20)
+data_commodity = load_data(default_commodity_file)
+data_temperature = load_data(default_temperature_file)
 
 # Ensure 'BillStartDate' and 'BillEndDate' are in datetime format in the commodity dataset
 for date_col in ['BillStartDate', 'BillEndDate']:
@@ -46,8 +37,6 @@ if 'Year-month' in data_temperature.columns and 'TAVG' in data_temperature.colum
 else:
     st.error("The temperature dataset must contain 'Year-month' and 'TAVG' columns.")
     st.stop()
-
-progress_bar.progress(40)
 
 # Campus selection (always required)
 selected_campus = st.sidebar.selectbox('Select Campus', sorted(data_commodity['ComplexName'].dropna().unique()))
@@ -75,26 +64,27 @@ else:
 available_meters = sorted(building_filtered_data['MeterName'].dropna().unique())
 selected_meters = st.sidebar.multiselect('Select Meter(s) (Optional)', available_meters, default=[])
 
-# Year selection (filtered based on selected commodity and buildings)
+# Horizontal Slider for Year selection
 available_years = sorted(building_filtered_data['Year'].dropna().unique())
-selected_years = st.sidebar.multiselect('Select Year(s) (Optional)', available_years, default=[])
-
-# Filter the data based on selected filters
-filtered_data = building_filtered_data
-
-if selected_meters:
-    filtered_data = filtered_data[filtered_data['MeterName'].isin(selected_meters)]
-
-if selected_years:
-    filtered_data = filtered_data[filtered_data['Year'].isin(selected_years)]
-
-progress_bar.progress(60)
+if available_years:
+    min_year, max_year = int(min(available_years)), int(max(available_years))
+    selected_year_range = st.slider(
+        "Which years are you interested in?",
+        min_year, max_year,
+        (min_year, max_year),
+        step=1
+    )
+    selected_years = list(range(selected_year_range[0], selected_year_range[1] + 1))
+    filtered_data = building_filtered_data[building_filtered_data['Year'].isin(selected_years)]
+else:
+    filtered_data = building_filtered_data
 
 # Handle the case when no data is available after filtering
 if filtered_data.empty:
     st.warning("No data available for the selected filters. Please adjust your filter options.")
     st.stop()
 
+# Rest of the code for visualizations...
 # Extract unique unit(s)
 units = filtered_data['Units'].dropna().unique()
 if len(units) == 1:
@@ -118,8 +108,14 @@ df_exploded['BillDays'] = (df_exploded['BillEndDate'] - df_exploded['BillStartDa
 
 # Handle division by zero or missing 'BillDays'
 df_exploded['BillDays'] = df_exploded['BillDays'].replace(0, pd.NA)
+
+# Divide TotalConsumption and TotalCost by BillDays to get daily values
 df_exploded['DailyConsumption'] = df_exploded['TotalConsumption'] / df_exploded['BillDays']
+df_exploded['DailyCost'] = df_exploded['TotalCost'] / df_exploded['BillDays']
+
+# Fill NaN values resulting from division by zero
 df_exploded['DailyConsumption'] = df_exploded['DailyConsumption'].fillna(0)
+df_exploded['DailyCost'] = df_exploded['DailyCost'].fillna(0)
 
 # Merge the temperature data based on 'Year-Month'
 df_exploded['Year-month'] = df_exploded['DateRange'].dt.to_period('M').dt.to_timestamp()
@@ -148,8 +144,6 @@ else:
     y_axis_column = 'TotalConsumption'
     y_axis_title = f'Total Consumption ({unit})'
 
-progress_bar.progress(80)
-
 # ---- First Visualization: Time Series plot with full date axis ----
 st.header(f"{y_axis_title} Over Time (Monthly Aggregation)")
 st.write("This time series visualization shows the consumption of the selected commodity over time, aggregated by month.")
@@ -159,7 +153,7 @@ if not consumption_by_month.empty:
         consumption_by_month,
         x='Year-month',
         y=y_axis_column,
-        title=f"{y_axis_title} of {selected_commodity} for {selected_campus} Over Time (Monthly Aggregation)",
+        title=f"{y_axis_title} of {selected_commodity} for {selected_campus} Over Time",
         markers=True
     )
 
@@ -187,8 +181,8 @@ st.write("This clustered bar chart compares the monthly consumption of the selec
 # Ensure months are in the correct order (January to December)
 df_exploded['Month'] = df_exploded['DateRange'].dt.month
 
-# Group by 'Month' and 'BuildingName' to get the monthly consumption for each building
-monthly_consumption_building = df_exploded.groupby(['Month', 'BuildingName'])[y_axis_column].sum().reset_index()
+# Group by 'Month', 'BuildingName', and 'Year' to get the monthly consumption for each building per year
+monthly_consumption_building = df_exploded.groupby(['Year', 'Month', 'BuildingName'])[y_axis_column].sum().reset_index()
 
 # Map numeric months to their names
 monthly_consumption_building['Month'] = monthly_consumption_building['Month'].map({
@@ -196,7 +190,7 @@ monthly_consumption_building['Month'] = monthly_consumption_building['Month'].ma
     7: 'Jul', 8: 'Aug', 9: 'Sep', 10: 'Oct', 11: 'Nov', 12: 'Dec'
 })
 
-# Create a grouped bar chart, where each building has a separate bar for each month
+# Create a grouped bar chart with color indicating building name and facet for year if multiple years are present
 if not monthly_consumption_building.empty:
     clustered_bar_chart_fig = px.bar(
         monthly_consumption_building,
@@ -204,26 +198,77 @@ if not monthly_consumption_building.empty:
         y=y_axis_column,
         color='BuildingName',  # Differentiate by building using color
         barmode='group',  # Group bars side-by-side for comparison
-        title=f"Monthly {y_axis_title} by Building for {selected_commodity} in {selected_campus}"
+        title=f"Monthly {y_axis_title} by Building for {selected_commodity} in {selected_campus}",
+        category_orders={"Month": ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                   "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]}
     )
 
-    # Customize layout
+    # Customize layout for improved readability
     clustered_bar_chart_fig.update_layout(
         xaxis_title='Month',
         yaxis_title=y_axis_title,
         plot_bgcolor='rgba(0,0,0,0)',  # Transparent background
         legend_title_text='Building',
-        xaxis_tickangle=-45  # Rotate x-axis labels
+        xaxis_tickangle=-45,  # Rotate x-axis labels
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
     )
 
     st.plotly_chart(clustered_bar_chart_fig, use_container_width=True)
 else:
     st.info(f"No data available for the {y_axis_title} Clustered Bar Chart visualization.")
 
+# ---- Time Series Visualization: Monthly Consumption by Building and Year ----
+st.header(f"Monthly {y_axis_title} Time Series for Selected Buildings by Year")
+st.write("This time series visualization shows the monthly consumption of the selected buildings, with separate lines for each building and year.")
+
+# Ensure months are in the correct order (January to December)
+df_exploded['Month'] = df_exploded['DateRange'].dt.month
+
+# Group by 'Month', 'Year', and 'BuildingName' to get the monthly consumption for each building per year
+monthly_consumption_timeseries = df_exploded.groupby(['Year', 'Month', 'BuildingName'])[y_axis_column].sum().reset_index()
+
+# Map numeric months to their names
+monthly_consumption_timeseries['Month'] = monthly_consumption_timeseries['Month'].map({
+    1: 'Jan', 2: 'Feb', 3: 'Mar', 4: 'Apr', 5: 'May', 6: 'Jun',
+    7: 'Jul', 8: 'Aug', 9: 'Sep', 10: 'Oct', 11: 'Nov', 12: 'Dec'
+})
+
+# Create a new column to combine BuildingName and Year for unique line representation
+monthly_consumption_timeseries['Building-Year'] = monthly_consumption_timeseries['BuildingName'] + ' (' + monthly_consumption_timeseries['Year'].astype(str) + ')'
+
+# Create a line plot where each line represents a unique combination of BuildingName and Year
+if not monthly_consumption_timeseries.empty:
+    timeseries_fig = px.line(
+        monthly_consumption_timeseries,
+        x='Month',
+        y=y_axis_column,
+        color='Building-Year',  # Differentiate each line by Building-Year combination
+        title=f"Monthly {y_axis_title} Time Series for Selected Buildings by Year",
+        markers=True,
+        labels={y_axis_column: y_axis_title},
+        category_orders = {"Month": ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                 "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]}
+    )
+
+    # Customize the layout for better readability
+    timeseries_fig.update_layout(
+        xaxis_title='Month',
+        yaxis_title=y_axis_title,
+        plot_bgcolor='rgba(0,0,0,0)',  # Transparent background
+        xaxis_tickangle=-45,  # Rotate x-axis labels
+        showlegend=True,
+        legend_title_text="Building & Year",
+        #legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+    )
+
+    st.plotly_chart(timeseries_fig, use_container_width=True)
+else:
+    st.info(f"No data available for the {y_axis_title} Time Series visualization.")
+
 # ---- Third Visualization: TotalConsumption by PrimaryUse and Year ----
 primaryuse_consumption = df_exploded.groupby(['Year', 'PrimaryUse'])[y_axis_column].sum().reset_index()
 
-st.header(f"Total {y_axis_title} by Primary Use and Year")
+st.header(f"{y_axis_title} by Primary Use and Year")
 st.write("This clustered bar chart compares the total consumption by the primary use of the building for different years.")
 
 if not primaryuse_consumption.empty:
@@ -248,7 +293,7 @@ else:
 
 # ---- Fourth Visualization: Scatterplot of Total Consumption versus Building Size ----
 if 'BuildingSizeSQFT' in df_exploded.columns and 'TotalCost' in df_exploded.columns:
-    st.header(f"Total {y_axis_title} vs Building Size (Bubble size represents TotalCost)")
+    st.header(f"{y_axis_title} vs Building Size (Bubble size represents TotalCost)")
 
     consumption_building_size = df_exploded.groupby('BuildingName').agg({
         y_axis_column: 'sum',
